@@ -1,8 +1,33 @@
 #!/usr/bin/env python3
+
+# Copyright (C) 2022 Bernhard Ehlers
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 """
 build - (re)build outdated docker images
 
 usage: build [image ...]
+
+When running without an image arg, it checks all images,
+if the directory containing its Dockerfile has changed or
+its base image has been updated.
+
+In some special cases a docker image needs a forced rebuild.
+For that add the list of images, to be rebuild, to the arguments.
+If the first image is "all", all images will be forcely rebuild.
+Further images following "all" will be skipped.
 """
 
 import os
@@ -33,11 +58,18 @@ def get_data(url, headers=None):
     return data
 
 def get_time_layers(repository):
-    """ get created time and layer info """
+    """
+    get created time and layer info from the docker registry
+
+    To retrieve this information the Docker Registry HTTP API V2 is used.
+    https://docs.docker.com/registry/spec/api/
+    """
+
     registry = DOCKER_REGISTRY
     auth = DOCKER_AUTH
     service = DOCKER_SERVICE
 
+    # extract registry and tag from repository
     repo = repository.split("/")
     repo_parts = len(repo)
     if repo_parts == 1:
@@ -54,10 +86,14 @@ def get_time_layers(repository):
         tag = "latest"
 
     try:
+        # Token authentication
+        # https://docs.docker.com/registry/spec/auth/token/
         err_allowed = (403,)
         data = get_data("https://{auth}/token?service={service}&scope=repository:{repo}:pull"
                         .format(auth=auth, service=service, repo=repo))
         token = data["token"]
+
+        # get manifest: GET /v2/{repo}/manifests/{tag}
         err_allowed = (401, 404)
         data = get_data("https://{registry}/v2/{repo}/manifests/{tag}"
                         .format(registry=registry, repo=repo, tag=tag),
@@ -71,6 +107,7 @@ def get_time_layers(repository):
             for manifest in data["manifests"]:
                 if manifest["platform"]["os"] == "linux" and \
                    manifest["platform"]["architecture"] == "amd64":
+                    # get manifest: GET /v2/{repo}/manifests/{digest}
                     data = get_data("https://{registry}/v2/{repo}/manifests/{digest}"
                                     .format(registry=registry, repo=repo,
                                             digest=manifest["digest"]),
@@ -81,6 +118,8 @@ def get_time_layers(repository):
             else:
                 sys.exit("{}: Missing architecture linux/amd64".format(repository))
         digest = data["config"]["digest"]
+
+        # get repository information: GET /v2/{repo}/blobs/{digest}
         data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
                         .format(registry=registry, repo=repo, digest=digest),
                         {"Authorization": "Bearer " + token})
@@ -162,6 +201,7 @@ def get_base_layers():
         if base_image in base_layer:
             continue
         itime_layers = get_time_layers(base_image)
+        # store last layer
         if itime_layers and len(itime_layers) > 1:
             base_layer[base_image] = itime_layers[-1]
         else:
@@ -184,7 +224,7 @@ def needs_rebuild(image):
     if base_layer[image["base"]] not in layers:
         return True
 
-    # check if build directory has changed
+    # check if build directory has changed, needs full git history
     try:
         proc = subprocess.run(["git", "log", "-n", "1", "--pretty=tformat:%ct",
                                image["dir"]],
@@ -223,6 +263,7 @@ def build(image):
                                   capture_output=True,
                                   check=True,
                                   universal_newlines=True)
+            # store last layer
             base_layer[image["name"]] = proc.stdout.rstrip('\r\n').split(",")[-1]
         except OSError as err:
             sys.exit("Can't run docker: {}".format(err))
@@ -236,7 +277,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 get_images()
 if args:				# image names from command line
-    if args[0] == "all":		# rebuild all, except the following
+    if args[0] == "all":		# rebuild all, except following images
         for img in images:
             if img["name"] not in args[1:]:
                 build(img)
