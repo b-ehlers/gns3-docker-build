@@ -1,0 +1,8 @@
+# Name				Directory	[Base Image]
+
+# ipterm
+ghcr.io/b-ehlers/ipterm-base	ipterm/base
+ghcr.io/b-ehlers/ipterm		ipterm/cli
+ghcr.io/b-ehlers/webterm	ipterm/web
+
+ghcr.io/b-ehlers/alpine-be	alpine-be

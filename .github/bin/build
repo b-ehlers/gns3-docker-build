@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+build - (re)build outdated docker images
+
+usage: build [image ...]
+"""
+
+import os
+import sys
+import json
+import re
+import subprocess
+import urllib.error
+import urllib.request
+import dateutil.parser
+
+DOCKER_REGISTRY = "registry-1.docker.io"
+DOCKER_AUTH = "auth.docker.io"
+DOCKER_SERVICE = "registry.docker.io"
+
+images = []
+base_layer = {}
+
+
+def get_data(url, headers=None):
+    """ get json formatted data from HTTP server """
+    req = urllib.request.Request(url)
+    if headers:
+        for key, value in headers.items():
+            req.add_header(key, value)
+    with urllib.request.urlopen(req) as resp:
+        data = json.load(resp)
+    return data
+
+def get_time_layers(repository):
+    """ get created time and layer info """
+    registry = DOCKER_REGISTRY
+    auth = DOCKER_AUTH
+    service = DOCKER_SERVICE
+
+    repo = repository.split("/")
+    repo_parts = len(repo)
+    if repo_parts == 1:
+        repo.insert(0, "library")
+    elif repo_parts >= 3:
+        registry = repo.pop(0)
+        auth = registry
+        service = registry
+    repo[-1], *tag = repo[-1].rsplit(":", 1)
+    repo = "/".join(repo)
+    if tag and tag[0]:
+        tag = tag[0]
+    else:
+        tag = "latest"
+
+    try:
+        err_allowed = (403,)
+        data = get_data("https://{auth}/token?service={service}&scope=repository:{repo}:pull"
+                        .format(auth=auth, service=service, repo=repo))
+        token = data["token"]
+        err_allowed = (401, 404)
+        data = get_data("https://{registry}/v2/{repo}/manifests/{tag}"
+                        .format(registry=registry, repo=repo, tag=tag),
+                        {"Authorization": "Bearer " + token,
+                         "Accept": "application/vnd.docker."
+                                   "distribution.manifest.v2+json, "
+                                   "application/vnd.docker."
+                                   "distribution.manifest.list.v2+json"})
+        err_allowed = ()
+        if "manifests" in data:		# list of manifests
+            for manifest in data["manifests"]:
+                if manifest["platform"]["os"] == "linux" and \
+                   manifest["platform"]["architecture"] == "amd64":
+                    data = get_data("https://{registry}/v2/{repo}/manifests/{digest}"
+                                    .format(registry=registry, repo=repo,
+                                            digest=manifest["digest"]),
+                                    {"Authorization": "Bearer " + token,
+                                     "Accept": "application/vnd.docker."
+                                               "distribution.manifest.v2+json"})
+                    break
+            else:
+                sys.exit("{}: Missing architecture linux/amd64".format(repository))
+        digest = data["config"]["digest"]
+        data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
+                        .format(registry=registry, repo=repo, digest=digest),
+                        {"Authorization": "Bearer " + token})
+        return [dateutil.parser.parse(data["created"]).timestamp()] + \
+               data["rootfs"]["diff_ids"]
+    except json.JSONDecodeError:
+        sys.exit("{}: {}".format(repository, "Invalid JSON"))
+    except urllib.error.HTTPError as err:
+        if err.code in err_allowed:
+            return None
+        sys.exit("{}: {}".format(repository, err))
+    except urllib.error.URLError as err:
+        sys.exit("{}: Connection failed: {}".format(repository, err.reason))
+    except KeyError:
+        sys.exit("{}: missing information from registry".format(repository))
+
+
+def get_images():
+    """ read 'images' configuration file
+
+    Format of 'images':
+    Name <tab> Directory [<tab> Base Image]
+
+    If the base image is not given, it is extracted from <directory>/Dockerfile.
+    """
+    name_list = []
+    re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
+    try:
+        with open("images", "r") as img_file:
+            lineno = 0
+            for line in img_file:
+                lineno += 1
+                line = line.strip().split("#", 1)[0]
+                img_split = [s for s in line.split('\t') if s]
+                len_split = len(img_split)
+                if len_split == 0:
+                    continue
+                if len_split == 2:
+                    base = None
+                elif len_split == 3:
+                    base = img_split[2]
+                else:
+                    sys.exit("images: invalid number of fields in line {}"
+                             .format(lineno))
+                if img_split[0] in name_list:
+                    sys.exit("images: multiple entries for {}"
+                             .format(img_split[0]))
+                name_list.append(img_split[0])
+                if not os.path.isdir(img_split[1]):
+                    sys.exit("images: unknown directory '{}' in line {}"
+                             .format(img_split[1], lineno))
+                if base is None:	# extract base repository from Dockerfile
+                    try:
+                        with open(os.path.join(img_split[1], "Dockerfile"), "r") \
+                             as dockerfile:
+                            for dockerline in dockerfile:
+                                match = re_from.match(dockerline)
+                                if match:
+                                    base = match.group(1)
+                                    break
+                    except OSError as err:
+                        sys.exit("images: Dockerfile in line {}: {}"
+                                 .format(lineno, err))
+                    if base is None:
+                        sys.exit("images: Dockerfile in line {}: {}"
+                                 .format(lineno, "Missing FROM instruction"))
+                images.append({"name": img_split[0],
+                               "dir": img_split[1],
+                               "base": base})
+    except OSError as err:
+        sys.exit("Can't read images file: {}".format(err))
+    if not images:
+        sys.exit("Empty image configuration")
+
+def get_base_layers():
+    """ get base image last layer """
+    for image in images:
+        base_image = image["base"]
+        if base_image in base_layer:
+            continue
+        itime_layers = get_time_layers(base_image)
+        if itime_layers and len(itime_layers) > 1:
+            base_layer[base_image] = itime_layers[-1]
+        else:
+            base_layer[base_image] = None
+
+def needs_rebuild(image):
+    """ check if an image needs rebuilding """
+    if not base_layer[image["base"]]:
+        sys.exit("Missing base image: {}".format(image["base"]))
+
+    # get image data
+    itime_layers = get_time_layers(image["name"])
+    if itime_layers:
+        itime, *layers = itime_layers
+    else:
+        itime = 0
+        layers = []
+
+    # check if base image has changed
+    if base_layer[image["base"]] not in layers:
+        return True
+
+    # check if build directory has changed
+    try:
+        proc = subprocess.run(["git", "log", "-n", "1", "--pretty=tformat:%ct",
+                               image["dir"]],
+                              capture_output=True,
+                              check=True,
+                              universal_newlines=True)
+        mtime = int(proc.stdout)
+    except OSError as err:
+        sys.exit("Can't run git: {}".format(err))
+    except (ValueError, subprocess.CalledProcessError) as err:
+        sys.exit("Can't get commit date of {}: {}"
+                 .format(image["name"], err.stderr.rstrip('\r\n')))
+    return mtime > itime
+
+
+def build(image):
+    """ build image """
+    print("*** {}\n".format(image["name"]))
+    build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
+    try:
+        proc = subprocess.run(["docker", "image", "build"] + build_options,
+                              check=True)
+        proc = subprocess.run(["docker", "push", image["name"]],
+                              check=True)
+    except OSError as err:
+        sys.exit("Can't run docker: {}".format(err))
+    except subprocess.CalledProcessError as err:
+        sys.exit(err.returncode)
+    print()
+
+    if image["name"] in base_layer:	# just modified a base image
+        try:
+            proc = subprocess.run(["docker", "image", "inspect",
+                                   "--format", '{{join .RootFS.Layers ","}}',
+                                   image["name"]],
+                                  capture_output=True,
+                                  check=True,
+                                  universal_newlines=True)
+            base_layer[image["name"]] = proc.stdout.rstrip('\r\n').split(",")[-1]
+        except OSError as err:
+            sys.exit("Can't run docker: {}".format(err))
+        except subprocess.CalledProcessError as err:
+            sys.exit("Can't get image layers of {}: {}"
+                     .format(image["name"], err.stderr.rstrip('\r\n')))
+
+
+args = sys.argv[1:]
+sys.stdout.reconfigure(line_buffering=True)
+
+get_images()
+if args:				# image names from command line
+    if args[0] == "all":		# rebuild all, except the following
+        for img in images:
+            if img["name"] not in args[1:]:
+                build(img)
+    else:				# rebuild images from args
+        name2image = {}
+        for img in images:
+            name2image[img["name"]] = img
+        for iname in args:
+            if iname not in name2image:
+                sys.exit("Image {} not found in 'images' configuration file"
+                         .format(iname))
+            build(name2image[iname])
+else:					# build only changed images
+    get_base_layers()
+    for img in images:
+        if needs_rebuild(img):
+            build(img)
