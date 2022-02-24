@@ -27,12 +27,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push images
+        env:
+          DOCKER_ACCOUNT: ${{ format('{0}/{1}', 'ghcr.io', github.actor) }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             set -f
             images=($(echo "${GITHUB_REF_NAME#_}" | tr ';_' ': '))
             set +f
-            python3 "$GITHUB_WORKSPACE/.github/bin/build" "${images[@]}"
           else
-            python3 "$GITHUB_WORKSPACE/.github/bin/build"
+            images=()
           fi
+          python3 "$GITHUB_WORKSPACE/.github/bin/build" "${images[@]}"

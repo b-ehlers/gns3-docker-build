@@ -1,6 +1,6 @@
 # docker image with basic networking tools and web browser
 
-FROM ghcr.io/b-ehlers/ipterm-base
+FROM ipterm-base
 
 RUN set -e -x \
 #

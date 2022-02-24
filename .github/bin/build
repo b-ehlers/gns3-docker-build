@@ -28,6 +28,9 @@ In some special cases a docker image needs a forced rebuild.
 For that add the list of images, to be rebuild, to the arguments.
 If the first image is "all", all images will be forcely rebuild.
 Further images following "all" will be skipped.
+
+The environment variable DOCKER_ACCOUNT must be set to the
+registry/user of the Docker account to use.
 """
 
 import os
@@ -44,7 +47,7 @@ DOCKER_AUTH = "auth.docker.io"
 DOCKER_SERVICE = "registry.docker.io"
 
 images = []
-base_layer = {}
+base_images = {}
 
 
 def get_data(url, headers=None):
@@ -56,6 +59,7 @@ def get_data(url, headers=None):
     with urllib.request.urlopen(req) as resp:
         data = json.load(resp)
     return data
+
 
 def get_time_layers(repository):
     """
@@ -145,7 +149,7 @@ def get_images():
 
     If the base image is not given, it is extracted from <directory>/Dockerfile.
     """
-    name_list = []
+    name_list = {}
     re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
     try:
         with open("images", "r") as img_file:
@@ -167,7 +171,7 @@ def get_images():
                 if img_split[0] in name_list:
                     sys.exit("images: multiple entries for {}"
                              .format(img_split[0]))
-                name_list.append(img_split[0])
+                name_list[img_split[0]] = True
                 if not os.path.isdir(img_split[1]):
                     sys.exit("images: unknown directory '{}' in line {}"
                              .format(img_split[1], lineno))
@@ -194,34 +198,48 @@ def get_images():
     if not images:
         sys.exit("Empty image configuration")
 
-def get_base_layers():
-    """ get base image last layer """
+
+def init_base_image():
+    """ initialize base image data structure """
+    name_list = {}
     for image in images:
-        base_image = image["base"]
-        if base_image in base_layer:
-            continue
-        itime_layers = get_time_layers(base_image)
-        # store last layer
-        if itime_layers and len(itime_layers) > 1:
-            base_layer[base_image] = itime_layers[-1]
-        else:
-            base_layer[base_image] = None
+        name_list[image["name"]] = True
+    for image in images:
+        base_name = image["base"]
+        if base_name not in base_images:
+            if base_name in name_list:
+                full_name = docker_acct + base_name
+            else:
+                full_name = base_name
+            base_images[base_name] = {"layer": None,
+                                      "full_name": full_name,
+                                      "need_dl": True}
+
 
 def needs_rebuild(image):
     """ check if an image needs rebuilding """
-    if not base_layer[image["base"]]:
-        sys.exit("Missing base image: {}".format(image["base"]))
+    # update base_images layer, if empty
+    base_img = base_images[image["base"]]
+    if not base_img["layer"]:
+        itime_layers = get_time_layers(base_img["full_name"])
+        # store last layer
+        if itime_layers and len(itime_layers) > 1:
+            base_img["layer"] = itime_layers[-1]
+        else:
+            sys.exit("Missing base image: {}".format(image["base"]))
 
     # get image data
-    itime_layers = get_time_layers(image["name"])
+    itime_layers = get_time_layers(docker_acct + image["name"])
     if itime_layers:
         itime, *layers = itime_layers
+        if image["name"] in base_images:
+            base_images[image["name"]]["layer"] = layers[-1]
     else:
         itime = 0
         layers = []
 
     # check if base image has changed
-    if base_layer[image["base"]] not in layers:
+    if base_img["layer"] not in layers:
         return True
 
     # check if build directory has changed, needs full git history
@@ -243,11 +261,28 @@ def needs_rebuild(image):
 def build(image):
     """ build image """
     print("*** {}\n".format(image["name"]))
-    build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
     try:
+        if base_images[image["base"]]["need_dl"]:
+            # need to download base image
+            proc = subprocess.run(["docker", "image", "pull",
+                                   base_images[image["base"]]["full_name"]],
+                                  check=True)
+            if image["base"] != base_images[image["base"]]["full_name"]:
+                proc = subprocess.run(["docker", "image", "tag",
+                                       base_images[image["base"]]["full_name"],
+                                       image["base"]],
+                                      stdout=subprocess.DEVNULL,
+                                      check=True)
+            base_images[image["base"]]["need_dl"] = False
+
+        build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
         proc = subprocess.run(["docker", "image", "build"] + build_options,
                               check=True)
-        proc = subprocess.run(["docker", "push", image["name"]],
+        proc = subprocess.run(["docker", "image", "tag",
+                               image["name"], docker_acct + image["name"]],
+                              stdout=subprocess.DEVNULL,
+                              check=True)
+        proc = subprocess.run(["docker", "push", docker_acct + image["name"]],
                               check=True)
     except OSError as err:
         sys.exit("Can't run docker: {}".format(err))
@@ -255,7 +290,7 @@ def build(image):
         sys.exit(err.returncode)
     print()
 
-    if image["name"] in base_layer:	# just modified a base image
+    if image["name"] in base_images:	# just modified a base image
         try:
             proc = subprocess.run(["docker", "image", "inspect",
                                    "--format", '{{join .RootFS.Layers ","}}',
@@ -264,7 +299,9 @@ def build(image):
                                   check=True,
                                   universal_newlines=True)
             # store last layer
-            base_layer[image["name"]] = proc.stdout.rstrip('\r\n').split(",")[-1]
+            base_images[image["name"]]["layer"] = \
+                proc.stdout.rstrip('\r\n').split(",")[-1]
+            base_images[image["base"]]["need_dl"] = False
         except OSError as err:
             sys.exit("Can't run docker: {}".format(err))
         except subprocess.CalledProcessError as err:
@@ -272,10 +309,17 @@ def build(image):
                      .format(image["name"], err.stderr.rstrip('\r\n')))
 
 
+# main
 args = sys.argv[1:]
 sys.stdout.reconfigure(line_buffering=True)
 
+docker_acct = os.environ.get("DOCKER_ACCOUNT")
+if not docker_acct:
+    sys.exit("Environment variable DOCKER_ACCOUNT is not defined or empty")
+if not docker_acct.endswith("/"):
+    docker_acct += "/"
 get_images()
+init_base_image()
 if args:				# image names from command line
     if args[0] == "all":		# rebuild all, except following images
         for img in images:
@@ -291,7 +335,6 @@ if args:				# image names from command line
                          .format(iname))
             build(name2image[iname])
 else:					# build only changed images
-    get_base_layers()
     for img in images:
         if needs_rebuild(img):
             build(img)
