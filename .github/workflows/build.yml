@@ -12,9 +12,6 @@ on:
 jobs:
   docker-images:
     runs-on: ubuntu-latest
-    # Prevents accidental execution in forked repositories.
-    # Change it to your username if you really want to run it.
-    if: ${{ github.actor == 'b-ehlers' }}
     steps:
       - name: Install python dateutil
         run: pip3 install --no-cache-dir python-dateutil
