@@ -199,7 +199,7 @@ def get_images():
         sys.exit("Empty image configuration")
 
 
-def init_base_image():
+def init_base_images():
     """ initialize base image data structure """
     name_list = {}
     for image in images:
@@ -218,7 +218,7 @@ def init_base_image():
 
 def needs_rebuild(image):
     """ check if an image needs rebuilding """
-    # update base_images layer, if empty
+    # update base_image layer, if empty
     base_img = base_images[image["base"]]
     if not base_img["layer"]:
         itime_layers = get_time_layers(base_img["full_name"])
@@ -249,41 +249,43 @@ def needs_rebuild(image):
                               capture_output=True,
                               check=True,
                               universal_newlines=True)
-        mtime = int(proc.stdout)
+        mtime = int(proc.stdout.strip())
     except OSError as err:
         sys.exit("Can't run git: {}".format(err))
-    except (ValueError, subprocess.CalledProcessError) as err:
+    except subprocess.CalledProcessError as err:
         sys.exit("Can't get commit date of {}: {}"
                  .format(image["name"], err.stderr.rstrip('\r\n')))
+    except ValueError as err:
+        sys.exit("Can't get commit date of {}: {}"
+                 .format(image["name"], err))
     return mtime > itime
 
 
 def build(image):
     """ build image """
     print("*** {}\n".format(image["name"]))
+    base_img = base_images[image["base"]]
     try:
-        if base_images[image["base"]]["need_dl"]:
-            # need to download base image
-            proc = subprocess.run(["docker", "image", "pull",
-                                   base_images[image["base"]]["full_name"]],
-                                  check=True)
-            if image["base"] != base_images[image["base"]]["full_name"]:
-                proc = subprocess.run(["docker", "image", "tag",
-                                       base_images[image["base"]]["full_name"],
-                                       image["base"]],
-                                      stdout=subprocess.DEVNULL,
-                                      check=True)
-            base_images[image["base"]]["need_dl"] = False
+        if base_img["need_dl"]:		# need to download base image
+            subprocess.run(["docker", "image", "pull",
+                            base_img["full_name"]],
+                           check=True)
+            if image["base"] != base_img["full_name"]:
+                subprocess.run(["docker", "image", "tag",
+                                base_img["full_name"], image["base"]],
+                               stdout=subprocess.DEVNULL,
+                               check=True)
+            base_img["need_dl"] = False
 
         build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
-        proc = subprocess.run(["docker", "image", "build"] + build_options,
-                              check=True)
-        proc = subprocess.run(["docker", "image", "tag",
-                               image["name"], docker_acct + image["name"]],
-                              stdout=subprocess.DEVNULL,
-                              check=True)
-        proc = subprocess.run(["docker", "push", docker_acct + image["name"]],
-                              check=True)
+        subprocess.run(["docker", "image", "build"] + build_options,
+                       check=True)
+        subprocess.run(["docker", "image", "tag",
+                        image["name"], docker_acct + image["name"]],
+                       stdout=subprocess.DEVNULL,
+                       check=True)
+        subprocess.run(["docker", "push", docker_acct + image["name"]],
+                       check=True)
     except OSError as err:
         sys.exit("Can't run docker: {}".format(err))
     except subprocess.CalledProcessError as err:
@@ -301,7 +303,7 @@ def build(image):
             # store last layer
             base_images[image["name"]]["layer"] = \
                 proc.stdout.rstrip('\r\n').split(",")[-1]
-            base_images[image["base"]]["need_dl"] = False
+            base_images[image["name"]]["need_dl"] = False
         except OSError as err:
             sys.exit("Can't run docker: {}".format(err))
         except subprocess.CalledProcessError as err:
@@ -318,8 +320,9 @@ if not docker_acct:
     sys.exit("Environment variable DOCKER_ACCOUNT is not defined or empty")
 if not docker_acct.endswith("/"):
     docker_acct += "/"
+
 get_images()
-init_base_image()
+init_base_images()
 if args:				# image names from command line
     if args[0] == "all":		# rebuild all, except following images
         for img in images:
