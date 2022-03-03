@@ -42,12 +42,9 @@ import urllib.error
 import urllib.request
 import dateutil.parser
 
-DOCKER_REGISTRY = "registry-1.docker.io"
-DOCKER_AUTH = "auth.docker.io"
-DOCKER_SERVICE = "registry.docker.io"
-
 images = []
 base_images = {}
+auth_url = {}
 
 
 def get_data(url, headers=None):
@@ -69,19 +66,15 @@ def get_time_layers(repository):
     https://docs.docker.com/registry/spec/api/
     """
 
-    registry = DOCKER_REGISTRY
-    auth = DOCKER_AUTH
-    service = DOCKER_SERVICE
-
     # extract registry and tag from repository
+    registry = "docker.io"
     repo = repository.split("/")
-    repo_parts = len(repo)
-    if repo_parts == 1:
-        repo.insert(0, "library")
-    elif repo_parts >= 3:
+    if len(repo) >= 2 and ("." in repo[0] or ":" in repo[0]):
         registry = repo.pop(0)
-        auth = registry
-        service = registry
+    if registry == "docker.io":
+        registry = "registry-1.docker.io"
+        if len(repo) == 1:
+            repo.insert(0, "library")
     repo[-1], *tag = repo[-1].rsplit(":", 1)
     repo = "/".join(repo)
     if tag and tag[0]:
@@ -89,19 +82,39 @@ def get_time_layers(repository):
     else:
         tag = "latest"
 
+    err_allowed = ()
     try:
+        # determine authentication URL
+        if registry not in auth_url:
+            try:
+                with urllib.request.urlopen("https://{}/v2/".format(registry)) \
+                     as resp:
+                    resp.read()
+                auth_url[registry] = None
+            except urllib.error.HTTPError as err:
+                if err.code != 401:
+                    sys.exit("{}: {}".format(repository, err))
+                www_auth = dict(re.findall(r'(\w+)\s*=\s*"([^"]+)"',
+                                           err.headers["WWW-Authenticate"]))
+                auth_url[registry] = "{realm}?service={service}" \
+                                     .format(realm=www_auth["realm"],
+                                             service=www_auth["service"])
+
         # Token authentication
         # https://docs.docker.com/registry/spec/auth/token/
-        err_allowed = (403,)
-        data = get_data("https://{auth}/token?service={service}&scope=repository:{repo}:pull"
-                        .format(auth=auth, service=service, repo=repo))
-        token = data["token"]
+        if auth_url[registry]:
+            err_allowed = (403,)
+            data = get_data("{auth_url}&scope=repository:{repo}:pull"
+                            .format(auth_url=auth_url[registry], repo=repo))
+            auth_header = {"Authorization": "Bearer " + data["token"]}
+        else:
+            auth_header = {}
 
         # get manifest: GET /v2/{repo}/manifests/{tag}
         err_allowed = (401, 404)
         data = get_data("https://{registry}/v2/{repo}/manifests/{tag}"
                         .format(registry=registry, repo=repo, tag=tag),
-                        {"Authorization": "Bearer " + token,
+                        {**auth_header,
                          "Accept": "application/vnd.docker."
                                    "distribution.manifest.v2+json, "
                                    "application/vnd.docker."
@@ -115,7 +128,7 @@ def get_time_layers(repository):
                     data = get_data("https://{registry}/v2/{repo}/manifests/{digest}"
                                     .format(registry=registry, repo=repo,
                                             digest=manifest["digest"]),
-                                    {"Authorization": "Bearer " + token,
+                                    {**auth_header,
                                      "Accept": "application/vnd.docker."
                                                "distribution.manifest.v2+json"})
                     break
@@ -126,7 +139,7 @@ def get_time_layers(repository):
         # get repository information: GET /v2/{repo}/blobs/{digest}
         data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
                         .format(registry=registry, repo=repo, digest=digest),
-                        {"Authorization": "Bearer " + token})
+                        auth_header)
         return [dateutil.parser.parse(data["created"]).timestamp()] + \
                data["rootfs"]["diff_ids"]
     except json.JSONDecodeError:
