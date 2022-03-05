@@ -220,10 +220,9 @@ def init_base_images():
     for image in images:
         base_name = image["base"]
         if base_name not in base_images:
-            if base_name in name_list:
-                full_name = docker_acct + base_name
-            else:
-                full_name = base_name
+            full_name = base_name
+            if "/" not in full_name and full_name in name_list:
+                full_name = docker_acct + full_name
             base_images[base_name] = {"layer": None,
                                       "full_name": full_name,
                                       "need_dl": True}
@@ -242,7 +241,10 @@ def needs_rebuild(image):
             sys.exit("Missing base image: {}".format(image["base"]))
 
     # get image data
-    itime_layers = get_time_layers(docker_acct + image["name"])
+    full_name = image["name"]
+    if "/" not in full_name:
+        full_name = docker_acct + full_name
+    itime_layers = get_time_layers(full_name)
     if itime_layers:
         itime, *layers = itime_layers
         if image["name"] in base_images:
@@ -293,11 +295,14 @@ def build(image):
         build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
         subprocess.run(["docker", "image", "build"] + build_options,
                        check=True)
-        subprocess.run(["docker", "image", "tag",
-                        image["name"], docker_acct + image["name"]],
-                       stdout=subprocess.DEVNULL,
-                       check=True)
-        subprocess.run(["docker", "push", docker_acct + image["name"]],
+        full_name = image["name"]
+        if "/" not in full_name:
+            full_name = docker_acct + full_name
+            subprocess.run(["docker", "image", "tag",
+                            image["name"], full_name],
+                           stdout=subprocess.DEVNULL,
+                           check=True)
+        subprocess.run(["docker", "push", full_name],
                        check=True)
     except OSError as err:
         sys.exit("Can't run docker: {}".format(err))
