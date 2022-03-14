@@ -20,6 +20,14 @@ build - (re)build outdated docker images
 
 usage: build [image ...]
 
+The docker images and their properties are configured in the
+file 'docker_images', located in the current directory.
+
+Format of 'docker_images':
+    Name <tab> Directory [<tab> Base Image] [<tab> Build Options]
+        or
+    Global Build Options
+
 When running without an image arg, it checks all images,
 if the directory containing its Dockerfile has changed or
 its base image has been updated.
@@ -37,6 +45,7 @@ import os
 import sys
 import json
 import re
+import shlex
 import subprocess
 import urllib.error
 import urllib.request
@@ -155,57 +164,73 @@ def get_time_layers(repository):
 
 
 def get_images():
-    """ read 'images' configuration file
+    """ read images configuration file
 
-    Format of 'images':
-    Name <tab> Directory [<tab> Base Image]
+    Format of 'docker_images':
+        Name <tab> Directory [<tab> Base Image] [<tab> Build Options]
+            or
+        Global Build Options
 
     If the base image is not given, it is extracted from <directory>/Dockerfile.
     """
+    image_file = "docker_images"
+    gbl_options = []
     name_list = {}
+    re_comment = re.compile(r'(?:^|\t) *#.*')
     re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
     try:
-        with open("images", "r") as img_file:
+        with open(image_file, "r") as img_file:
             lineno = 0
             for line in img_file:
                 lineno += 1
-                line = line.strip().split("#", 1)[0]
+                line = re_comment.sub("", line.strip())
                 img_split = [s for s in line.split('\t') if s]
                 len_split = len(img_split)
                 if len_split == 0:
                     continue
-                if len_split == 2:
-                    base = None
-                elif len_split == 3:
-                    base = img_split[2]
-                else:
-                    sys.exit("images: invalid number of fields in line {}"
-                             .format(lineno))
+                if len_split == 1:
+                    gbl_options = shlex.split(img_split[0])
+                    while gbl_options and not gbl_options[0]:
+                        gbl_options = gbl_options[1:]
+                    continue
+                base = None
+                if len_split >= 3 and img_split[2][0] not in ('-', '"', "'"):
+                    base = img_split.pop(2)
+                    len_split -= 1
+                options = gbl_options.copy()
+                if len_split >= 3:
+                    options += shlex.split(img_split.pop(2))
+                    len_split -= 1
+                if len_split != 2:
+                    sys.exit("{}: invalid number of fields in line {}"
+                             .format(image_file, lineno))
                 if img_split[0] in name_list:
-                    sys.exit("images: multiple entries for {}"
-                             .format(img_split[0]))
+                    sys.exit("{}: multiple entries for {}"
+                             .format(image_file, img_split[0]))
                 name_list[img_split[0]] = True
                 if not os.path.isdir(img_split[1]):
-                    sys.exit("images: unknown directory '{}' in line {}"
-                             .format(img_split[1], lineno))
-                if base is None:	# extract base repository from Dockerfile
+                    sys.exit("{}: unknown directory '{}' in line {}"
+                             .format(image_file, img_split[1], lineno))
+                if base is None:	# extract base repo from Dockerfile
                     try:
-                        with open(os.path.join(img_split[1], "Dockerfile"), "r") \
-                             as dockerfile:
+                        with open(os.path.join(img_split[1], "Dockerfile"),
+                                  "r") as dockerfile:
                             for dockerline in dockerfile:
                                 match = re_from.match(dockerline)
                                 if match:
                                     base = match.group(1)
                                     break
                     except OSError as err:
-                        sys.exit("images: Dockerfile in line {}: {}"
-                                 .format(lineno, err))
+                        sys.exit("{}: Dockerfile in line {}: {}"
+                                 .format(image_file, lineno, err))
                     if base is None:
-                        sys.exit("images: Dockerfile in line {}: {}"
-                                 .format(lineno, "Missing FROM instruction"))
+                        sys.exit("{}: Dockerfile in line {}: {}"
+                                 .format(image_file, lineno,
+                                         "Missing FROM instruction"))
                 images.append({"name": img_split[0],
                                "dir": img_split[1],
-                               "base": base})
+                               "base": base,
+                               "options": options})
     except OSError as err:
         sys.exit("Can't read images file: {}".format(err))
     if not images:
@@ -292,8 +317,8 @@ def build(image):
                                check=True)
             base_img["need_dl"] = False
 
-        build_options = ["--force-rm", "--tag", image["name"], image["dir"]]
-        subprocess.run(["docker", "image", "build"] + build_options,
+        subprocess.run(["docker", "image", "build"] + image["options"] + \
+                       ["--tag", image["name"], image["dir"]],
                        check=True)
         full_name = image["name"]
         if "/" not in full_name:

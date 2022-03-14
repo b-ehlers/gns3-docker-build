@@ -1,0 +1,10 @@
+# Name		Directory	[Base Image]	[Build Options]
+
+--force-rm			# global options
+
+# ipterm
+ipterm-base	ipterm/base
+ipterm		ipterm/cli
+webterm		ipterm/web
+
+alpine-be	alpine-be			--no-cache=False

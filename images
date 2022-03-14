@@ -1,8 +1,0 @@
-# Name		Directory	[Base Image]
-
-# ipterm
-ipterm-base	ipterm/base
-ipterm		ipterm/cli
-webterm		ipterm/web
-
-alpine-be	alpine-be
