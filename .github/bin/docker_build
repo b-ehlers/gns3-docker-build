@@ -239,18 +239,10 @@ def get_images():
 
 def init_base_images():
     """ initialize base image data structure """
-    name_list = {}
-    for image in images:
-        name_list[image["name"]] = True
     for image in images:
         base_name = image["base"]
         if base_name not in base_images:
-            full_name = base_name
-            if "/" not in full_name and full_name in name_list:
-                full_name = docker_acct + full_name
-            base_images[base_name] = {"layer": None,
-                                      "full_name": full_name,
-                                      "need_dl": True}
+            base_images[base_name] = {"layer": None}
 
 
 def needs_rebuild(image):
@@ -258,7 +250,7 @@ def needs_rebuild(image):
     # update base_image layer, if empty
     base_img = base_images[image["base"]]
     if not base_img["layer"]:
-        itime_layers = get_time_layers(base_img["full_name"])
+        itime_layers = get_time_layers(image["base"])
         # store last layer
         if itime_layers and len(itime_layers) > 1:
             base_img["layer"] = itime_layers[-1]
@@ -272,8 +264,8 @@ def needs_rebuild(image):
     itime_layers = get_time_layers(full_name)
     if itime_layers:
         itime, *layers = itime_layers
-        if image["name"] in base_images:
-            base_images[image["name"]]["layer"] = layers[-1]
+        if full_name in base_images:	# image is a base image
+            base_images[full_name]["layer"] = layers[-1]
     else:
         itime = 0
         layers = []
@@ -304,30 +296,12 @@ def needs_rebuild(image):
 def build(image):
     """ build image """
     print("*** {}\n".format(image["name"]))
-    base_img = base_images[image["base"]]
+    full_name = image["name"]
+    if "/" not in full_name:
+        full_name = docker_acct + full_name
     try:
-        if base_img["need_dl"]:		# need to download base image
-            subprocess.run(["docker", "image", "pull",
-                            base_img["full_name"]],
-                           check=True)
-            if image["base"] != base_img["full_name"]:
-                subprocess.run(["docker", "image", "tag",
-                                base_img["full_name"], image["base"]],
-                               stdout=subprocess.DEVNULL,
-                               check=True)
-            base_img["need_dl"] = False
-
-        subprocess.run(["docker", "image", "build"] + image["options"] + \
-                       ["--tag", image["name"], image["dir"]],
-                       check=True)
-        full_name = image["name"]
-        if "/" not in full_name:
-            full_name = docker_acct + full_name
-            subprocess.run(["docker", "image", "tag",
-                            image["name"], full_name],
-                           stdout=subprocess.DEVNULL,
-                           check=True)
-        subprocess.run(["docker", "push", full_name],
+        subprocess.run(["docker", "buildx", "build"] + image["options"] + \
+                       ["--push", "--tag", full_name, image["dir"]],
                        check=True)
     except OSError as err:
         sys.exit("Can't run docker: {}".format(err))
@@ -335,23 +309,13 @@ def build(image):
         sys.exit(err.returncode)
     print()
 
-    if image["name"] in base_images:	# just modified a base image
-        try:
-            proc = subprocess.run(["docker", "image", "inspect",
-                                   "--format", '{{join .RootFS.Layers ","}}',
-                                   image["name"]],
-                                  capture_output=True,
-                                  check=True,
-                                  universal_newlines=True)
-            # store last layer
-            base_images[image["name"]]["layer"] = \
-                proc.stdout.rstrip('\r\n').split(",")[-1]
-            base_images[image["name"]]["need_dl"] = False
-        except OSError as err:
-            sys.exit("Can't run docker: {}".format(err))
-        except subprocess.CalledProcessError as err:
-            sys.exit("Can't get image layers of {}: {}"
-                     .format(image["name"], err.stderr.rstrip('\r\n')))
+    if full_name in base_images:	# just modified a base image
+        itime_layers = get_time_layers(full_name)
+        # store last layer
+        if itime_layers and len(itime_layers) > 1:
+            base_images[full_name]["layer"] = itime_layers[-1]
+        else:
+            sys.exit("Can't get image layers of {}".format(image["name"]))
 
 
 # main
