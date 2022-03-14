@@ -2,7 +2,9 @@
 
 FROM debian:bullseye-slim
 
-COPY msend mreceive /usr/local/bin/
+ARG TARGETARCH
+
+COPY ${TARGETARCH:-amd64}/* /usr/local/bin/
 
 RUN set -e -x \
     && export DEBIAN_FRONTEND=noninteractive \

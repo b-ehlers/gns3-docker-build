@@ -1,6 +1,6 @@
 # docker image with basic networking tools
 
-FROM ipterm-base
+FROM ghcr.io/b-ehlers/ipterm-base
 
 #
 # startup script

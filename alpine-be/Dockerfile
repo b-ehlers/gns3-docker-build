@@ -2,7 +2,9 @@
 
 FROM alpine
 
-COPY nodnsd /usr/local/sbin/
+ARG TARGETARCH
+
+COPY nodnsd.${TARGETARCH:-amd64} /usr/local/sbin/nodnsd
 
 RUN set -e -x -o pipefail \
 #
