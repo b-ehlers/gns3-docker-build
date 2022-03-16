@@ -43,6 +43,7 @@ registry/user of the Docker account to use.
 
 import os
 import sys
+import base64
 import json
 import re
 import shlex
@@ -113,8 +114,22 @@ def get_time_layers(repository):
         # https://docs.docker.com/registry/spec/auth/token/
         if auth_url[registry]:
             err_allowed = (403,)
-            data = get_data("{auth_url}&scope=repository:{repo}:pull"
-                            .format(auth_url=auth_url[registry], repo=repo))
+            if (registry == docker_registry or \
+                registry.endswith('.' + docker_registry)) and \
+               repo.startswith(docker_user + "/") and docker_passwd:
+                # user/password authentication (for private repositories)
+                auth_header = {"Authorization": "Basic " + \
+                               base64.b64encode((docker_user+':'+docker_passwd)
+                                                .encode()).decode('ascii')}
+                data = get_data("{auth_url}&account={account}"
+                                "&scope=repository:{repo}:pull"
+                                .format(auth_url=auth_url[registry],
+                                        account=docker_user, repo=repo),
+                                auth_header)
+            else:
+                # public access (for public repositories)
+                data = get_data("{auth_url}&scope=repository:{repo}:pull"
+                                .format(auth_url=auth_url[registry], repo=repo))
             auth_header = {"Authorization": "Bearer " + data["token"]}
         else:
             auth_header = {}
@@ -325,8 +340,13 @@ sys.stdout.reconfigure(line_buffering=True)
 docker_acct = os.environ.get("DOCKER_ACCOUNT")
 if not docker_acct:
     sys.exit("Environment variable DOCKER_ACCOUNT is not defined or empty")
-if not docker_acct.endswith("/"):
-    docker_acct += "/"
+docker_passwd = os.environ.get("DOCKER_PASSWORD")
+docker_acct = docker_acct.rstrip("/")
+if "/" in docker_acct:
+    docker_registry, docker_user, *_ = docker_acct.split("/")
+else:
+    docker_registry, docker_user = ("docker.io", docker_acct)
+docker_acct += "/"
 
 get_images()
 init_base_images()

@@ -40,8 +40,11 @@ jobs:
       - name: Build and push images
         env:
           DOCKER_ACCOUNT: ${{ format('{0}/{1}', 'ghcr.io', github.actor) }}
+          # DOCKER_PASSWORD is optional, only needed for private repositories
+          DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           # DockerHub:
           # DOCKER_ACCOUNT: ${{ secrets.DOCKERHUB_USERNAME }}
+          # DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             set -f
