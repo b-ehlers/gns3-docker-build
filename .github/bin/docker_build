@@ -57,6 +57,34 @@ base_images = {}
 auth_url = {}
 
 
+def parse_repository(repository):
+    """ extract registry, user and tag from repository """
+    repo = repository.split("/")
+    # extract registry
+    if len(repo) >= 2 and ("." in repo[0] or ":" in repo[0]):
+        registry = repo.pop(0)
+    else:
+        registry = "docker.io"
+    # extract user
+    if len(repo) >= 2:
+        user = repo[0]
+    else:
+        user = ""
+    # special handling for docker.io
+    if registry == "docker.io":
+        registry = "registry-1.docker.io"
+    if registry.endswith(".docker.io") and len(repo) == 1:
+        repo.insert(0, "library")
+    # extract tag
+    repo[-1], *tag = repo[-1].rsplit(":", 1)
+    repo = "/".join(repo)
+    if tag and tag[0]:
+        tag = tag[0]
+    else:
+        tag = "latest"
+    return registry, user, repo, tag
+
+
 def get_data(url, headers=None):
     """ get json formatted data from HTTP server """
     req = urllib.request.Request(url)
@@ -68,6 +96,79 @@ def get_data(url, headers=None):
     return data
 
 
+def get_auth_token(repository, registry, user, repo):
+    """ get authentification token for Docker API """
+
+    # determine authentication URL
+    if registry not in auth_url:
+        try:
+            with urllib.request.urlopen("https://{}/v2/".format(registry)) \
+                 as resp:
+                resp.read()
+            auth_url[registry] = None
+        except urllib.error.HTTPError as err:
+            if err.code != 401:
+                sys.exit("{}: {}".format(repository, err))
+            www_auth = dict(re.findall(r'(\w+)\s*=\s*"([^"]+)"',
+                                       err.headers["WWW-Authenticate"]))
+            auth_url[registry] = "{realm}?service={service}" \
+                                 .format(realm=www_auth["realm"],
+                                         service=www_auth["service"])
+
+    # Token authentication
+    # https://docs.docker.com/registry/spec/auth/token/
+    if auth_url[registry]:
+        if registry == docker_registry and user and \
+           user == docker_user and docker_passwd:
+            # user/password authentication (for private repositories)
+            auth_header = {"Authorization": "Basic " + \
+                           base64.b64encode((docker_user+':'+docker_passwd)
+                                            .encode()).decode('ascii')}
+            data = get_data("{auth_url}&account={account}"
+                            "&scope=repository:{repo}:pull"
+                            .format(auth_url=auth_url[registry],
+                                    account=docker_user, repo=repo),
+                            auth_header)
+        else:
+            # public access (for public repositories)
+            data = get_data("{auth_url}&scope=repository:{repo}:pull"
+                            .format(auth_url=auth_url[registry], repo=repo))
+        auth_header = {"Authorization": "Bearer " + data["token"]}
+    else:
+        auth_header = {}
+
+    return auth_header
+
+
+def get_manifest(repository, registry, repo, tag, auth_header):
+    """ get manifest of the repository """
+
+    # get manifest: GET /v2/{repo}/manifests/{tag}
+    data = get_data("https://{registry}/v2/{repo}/manifests/{tag}"
+                    .format(registry=registry, repo=repo, tag=tag),
+                    {**auth_header,
+                     "Accept": "application/vnd.docker."
+                               "distribution.manifest.v2+json, "
+                               "application/vnd.docker."
+                               "distribution.manifest.list.v2+json"})
+    if "manifests" in data:		# list of manifests
+        for manifest in data["manifests"]:
+            if manifest["platform"]["os"] == "linux" and \
+               manifest["platform"]["architecture"] == "amd64":
+                # get manifest: GET /v2/{repo}/manifests/{digest}
+                data = get_data("https://{registry}/v2/{repo}/manifests/{digest}"
+                                .format(registry=registry, repo=repo,
+                                        digest=manifest["digest"]),
+                                {**auth_header,
+                                 "Accept": "application/vnd.docker."
+                                           "distribution.manifest.v2+json"})
+                break
+        else:
+            sys.exit("{}: Missing architecture linux/amd64".format(repository))
+
+    return data
+
+
 def get_time_layers(repository):
     """
     get created time and layer info from the docker registry
@@ -76,91 +177,19 @@ def get_time_layers(repository):
     https://docs.docker.com/registry/spec/api/
     """
 
-    # extract registry and tag from repository
-    registry = "docker.io"
-    repo = repository.split("/")
-    if len(repo) >= 2 and ("." in repo[0] or ":" in repo[0]):
-        registry = repo.pop(0)
-    if registry == "docker.io":
-        registry = "registry-1.docker.io"
-        if len(repo) == 1:
-            repo.insert(0, "library")
-    repo[-1], *tag = repo[-1].rsplit(":", 1)
-    repo = "/".join(repo)
-    if tag and tag[0]:
-        tag = tag[0]
-    else:
-        tag = "latest"
-
-    err_allowed = ()
+    registry, user, repo, tag = parse_repository(repository)
     try:
-        # determine authentication URL
-        if registry not in auth_url:
-            try:
-                with urllib.request.urlopen("https://{}/v2/".format(registry)) \
-                     as resp:
-                    resp.read()
-                auth_url[registry] = None
-            except urllib.error.HTTPError as err:
-                if err.code != 401:
-                    sys.exit("{}: {}".format(repository, err))
-                www_auth = dict(re.findall(r'(\w+)\s*=\s*"([^"]+)"',
-                                           err.headers["WWW-Authenticate"]))
-                auth_url[registry] = "{realm}?service={service}" \
-                                     .format(realm=www_auth["realm"],
-                                             service=www_auth["service"])
+        # get authentification token
+        err_allowed = (403,)
+        auth_header = get_auth_token(repository, registry, user, repo)
 
-        # Token authentication
-        # https://docs.docker.com/registry/spec/auth/token/
-        if auth_url[registry]:
-            err_allowed = (403,)
-            if (registry == docker_registry or \
-                registry.endswith('.' + docker_registry)) and \
-               repo.startswith(docker_user + "/") and docker_passwd:
-                # user/password authentication (for private repositories)
-                auth_header = {"Authorization": "Basic " + \
-                               base64.b64encode((docker_user+':'+docker_passwd)
-                                                .encode()).decode('ascii')}
-                data = get_data("{auth_url}&account={account}"
-                                "&scope=repository:{repo}:pull"
-                                .format(auth_url=auth_url[registry],
-                                        account=docker_user, repo=repo),
-                                auth_header)
-            else:
-                # public access (for public repositories)
-                data = get_data("{auth_url}&scope=repository:{repo}:pull"
-                                .format(auth_url=auth_url[registry], repo=repo))
-            auth_header = {"Authorization": "Bearer " + data["token"]}
-        else:
-            auth_header = {}
-
-        # get manifest: GET /v2/{repo}/manifests/{tag}
+        # get manifest
         err_allowed = (401, 404)
-        data = get_data("https://{registry}/v2/{repo}/manifests/{tag}"
-                        .format(registry=registry, repo=repo, tag=tag),
-                        {**auth_header,
-                         "Accept": "application/vnd.docker."
-                                   "distribution.manifest.v2+json, "
-                                   "application/vnd.docker."
-                                   "distribution.manifest.list.v2+json"})
-        err_allowed = ()
-        if "manifests" in data:		# list of manifests
-            for manifest in data["manifests"]:
-                if manifest["platform"]["os"] == "linux" and \
-                   manifest["platform"]["architecture"] == "amd64":
-                    # get manifest: GET /v2/{repo}/manifests/{digest}
-                    data = get_data("https://{registry}/v2/{repo}/manifests/{digest}"
-                                    .format(registry=registry, repo=repo,
-                                            digest=manifest["digest"]),
-                                    {**auth_header,
-                                     "Accept": "application/vnd.docker."
-                                               "distribution.manifest.v2+json"})
-                    break
-            else:
-                sys.exit("{}: Missing architecture linux/amd64".format(repository))
+        data = get_manifest(repository, registry, repo, tag, auth_header)
         digest = data["config"]["digest"]
 
         # get repository information: GET /v2/{repo}/blobs/{digest}
+        err_allowed = ()
         data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
                         .format(registry=registry, repo=repo, digest=digest),
                         auth_header)
@@ -178,6 +207,25 @@ def get_time_layers(repository):
         sys.exit("{}: missing information from registry".format(repository))
 
 
+def dockerfile_base(directory, image_file, lineno):
+    """ get base repository from Dockerfile """
+    re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
+    try:
+        with open(os.path.join(directory, "Dockerfile"), "r") as dockerfile:
+            for dockerline in dockerfile:
+                match = re_from.match(dockerline)
+                if match:
+                    base = match.group(1)
+                    break
+    except OSError as err:
+        sys.exit("{}: Dockerfile in line {}: {}"
+                 .format(image_file, lineno, err))
+    if base is None:
+        sys.exit("{}: Dockerfile in line {}: {}"
+                 .format(image_file, lineno, "Missing FROM instruction"))
+    return base
+
+
 def get_images():
     """ read images configuration file
 
@@ -192,7 +240,6 @@ def get_images():
     gbl_options = []
     name_list = {}
     re_comment = re.compile(r'(?:^|\t) *#.*')
-    re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
     try:
         with open(image_file, "r") as img_file:
             lineno = 0
@@ -227,21 +274,7 @@ def get_images():
                     sys.exit("{}: unknown directory '{}' in line {}"
                              .format(image_file, img_split[1], lineno))
                 if base is None:	# extract base repo from Dockerfile
-                    try:
-                        with open(os.path.join(img_split[1], "Dockerfile"),
-                                  "r") as dockerfile:
-                            for dockerline in dockerfile:
-                                match = re_from.match(dockerline)
-                                if match:
-                                    base = match.group(1)
-                                    break
-                    except OSError as err:
-                        sys.exit("{}: Dockerfile in line {}: {}"
-                                 .format(image_file, lineno, err))
-                    if base is None:
-                        sys.exit("{}: Dockerfile in line {}: {}"
-                                 .format(image_file, lineno,
-                                         "Missing FROM instruction"))
+                    base = dockerfile_base(img_split[1], image_file, lineno)
                 images.append({"name": img_split[0],
                                "dir": img_split[1],
                                "base": base,
@@ -341,12 +374,9 @@ docker_acct = os.environ.get("DOCKER_ACCOUNT")
 if not docker_acct:
     sys.exit("Environment variable DOCKER_ACCOUNT is not defined or empty")
 docker_passwd = os.environ.get("DOCKER_PASSWORD")
-docker_acct = docker_acct.rstrip("/")
-if "/" in docker_acct:
-    docker_registry, docker_user, *_ = docker_acct.split("/")
-else:
-    docker_registry, docker_user = ("docker.io", docker_acct)
-docker_acct += "/"
+if not docker_acct.endswith("/"):
+    docker_acct += "/"
+docker_registry, docker_user, *_ = parse_repository(docker_acct + "dummy")
 
 get_images()
 init_base_images()
