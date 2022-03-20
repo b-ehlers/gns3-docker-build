@@ -374,7 +374,7 @@ sys.stdout.reconfigure(line_buffering=True)
 docker_acct = os.environ.get("DOCKER_ACCOUNT")
 if not docker_acct:
     sys.exit("Environment variable DOCKER_ACCOUNT is not defined or empty")
-docker_passwd = os.environ.get("DOCKER_PASSWORD")
+docker_passwd = os.environ.pop("DOCKER_PASSWORD", None)
 if not docker_acct.endswith("/"):
     docker_acct += "/"
 docker_registry, docker_user, *_ = parse_repository(docker_acct + "dummy")
