@@ -48,13 +48,13 @@ import json
 import re
 import shlex
 import subprocess
-import urllib.error
-import urllib.request
+import requests
 import dateutil.parser
 
-images = []
-base_images = {}
+api_sess = requests.Session()
 auth_url = {}
+base_images = {}
+images = []
 
 
 def parse_repository(repository):
@@ -85,32 +85,27 @@ def parse_repository(repository):
     return registry, user, repo, tag
 
 
-def get_data(url, headers=None):
+def get_data(url, headers=None, status_none=None):
     """ get json formatted data from HTTP server """
-    req = urllib.request.Request(url)
-    if headers:
-        for key, value in headers.items():
-            req.add_header(key, value)
-    with urllib.request.urlopen(req) as resp:
-        data = json.load(resp)
-    return data
+    resp = api_sess.get(url, headers=headers, timeout=30)
+    if status_none and resp.status_code in status_none:
+        return None
+    resp.raise_for_status()
+    return json.loads(resp.content)
 
 
-def get_auth_token(repository, registry, user, repo):
+def get_auth_token(registry, user, repo):
     """ get authentification token for Docker API """
 
     # determine authentication URL
     if registry not in auth_url:
-        try:
-            with urllib.request.urlopen("https://{}/v2/".format(registry)) \
-                 as resp:
-                resp.read()
+        resp = api_sess.get("https://{}/v2/".format(registry), timeout=10)
+        if resp.status_code != 401:
+            resp.raise_for_status()
             auth_url[registry] = None
-        except urllib.error.HTTPError as err:
-            if err.code != 401:
-                sys.exit("{}: {}".format(repository, err))
+        else:
             www_auth = dict(re.findall(r'(\w+)\s*=\s*"([^"]+)"',
-                                       err.headers["WWW-Authenticate"]))
+                                       resp.headers["WWW-Authenticate"]))
             auth_url[registry] = "{realm}?service={service}" \
                                  .format(realm=www_auth["realm"],
                                          service=www_auth["service"])
@@ -128,11 +123,14 @@ def get_auth_token(repository, registry, user, repo):
                             "&scope=repository:{repo}:pull"
                             .format(auth_url=auth_url[registry],
                                     account=docker_user, repo=repo),
-                            auth_header)
+                            auth_header, status_none=(403,))
         else:
             # public access (for public repositories)
             data = get_data("{auth_url}&scope=repository:{repo}:pull"
-                            .format(auth_url=auth_url[registry], repo=repo))
+                            .format(auth_url=auth_url[registry], repo=repo),
+                            status_none=(403,))
+        if data is None:
+            return None
         auth_header = {"Authorization": "Bearer " + data["token"]}
     else:
         auth_header = {}
@@ -140,7 +138,7 @@ def get_auth_token(repository, registry, user, repo):
     return auth_header
 
 
-def get_manifest(repository, registry, repo, tag, auth_header):
+def get_manifest(registry, repo, tag, auth_header):
     """ get manifest of the repository """
 
     # get manifest: GET /v2/{repo}/manifests/{tag}
@@ -150,8 +148,9 @@ def get_manifest(repository, registry, repo, tag, auth_header):
                      "Accept": "application/vnd.docker."
                                "distribution.manifest.v2+json, "
                                "application/vnd.docker."
-                               "distribution.manifest.list.v2+json"})
-    if "manifests" in data:		# list of manifests
+                               "distribution.manifest.list.v2+json"},
+                    status_none=(401, 404))
+    if data and "manifests" in data:	# list of manifests
         for manifest in data["manifests"]:
             if manifest["platform"]["os"] == "linux" and \
                manifest["platform"]["architecture"] == "amd64":
@@ -164,7 +163,7 @@ def get_manifest(repository, registry, repo, tag, auth_header):
                                            "distribution.manifest.v2+json"})
                 break
         else:
-            sys.exit("{}: Missing architecture linux/amd64".format(repository))
+            raise ValueError("Missing architecture linux/amd64")
 
     return data
 
@@ -180,16 +179,17 @@ def get_time_layers(repository):
     registry, user, repo, tag = parse_repository(repository)
     try:
         # get authentification token
-        err_allowed = (403,)
-        auth_header = get_auth_token(repository, registry, user, repo)
+        auth_header = get_auth_token(registry, user, repo)
+        if auth_header is None:
+            return None
 
         # get manifest
-        err_allowed = (401, 404)
-        data = get_manifest(repository, registry, repo, tag, auth_header)
+        data = get_manifest(registry, repo, tag, auth_header)
+        if data is None:
+            return None
         digest = data["config"]["digest"]
 
         # get repository information: GET /v2/{repo}/blobs/{digest}
-        err_allowed = ()
         data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
                         .format(registry=registry, repo=repo, digest=digest),
                         auth_header)
@@ -197,12 +197,13 @@ def get_time_layers(repository):
                data["rootfs"]["diff_ids"]
     except json.JSONDecodeError:
         sys.exit("{}: {}".format(repository, "Invalid JSON"))
-    except urllib.error.HTTPError as err:
-        if err.code in err_allowed:
-            return None
-        sys.exit("{}: {}".format(repository, err))
-    except urllib.error.URLError as err:
-        sys.exit("{}: Connection failed: {}".format(repository, err.reason))
+    except (requests.exceptions.RequestException, ValueError) as err:
+        msg = str(err)
+        match = re.search(r"\(Caused by ([a-zA-Z0-9_]+)\('?[^:']*[:'] *(.*)'\)",
+                          msg)
+        if match:
+            msg = match.group(2)
+        sys.exit("{}: {}".format(repository, msg))
     except KeyError:
         sys.exit("{}: missing information from registry".format(repository))
 
