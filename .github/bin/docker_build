@@ -48,10 +48,10 @@ import json
 import re
 import shlex
 import subprocess
+import urllib3
 import requests
 import dateutil.parser
 
-api_sess = requests.Session()
 auth_url = {}
 base_images = {}
 images = []
@@ -83,6 +83,17 @@ def parse_repository(repository):
     else:
         tag = "latest"
     return registry, user, repo, tag
+
+
+def requests_session_retry(retries=2, backoff=1.0):
+    """ open requests session with retry parameter """
+
+    session = requests.Session()
+    retry = urllib3.util.retry.Retry(total=retries, backoff_factor=backoff)
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 
 def get_data(url, headers=None, status_none=None):
@@ -378,6 +389,8 @@ docker_passwd = os.environ.pop("DOCKER_PASSWORD", None)
 if not docker_acct.endswith("/"):
     docker_acct += "/"
 docker_registry, docker_user, *_ = parse_repository(docker_acct + "dummy")
+
+api_sess = requests_session_retry(2)
 
 get_images()
 init_base_images()
