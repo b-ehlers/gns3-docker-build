@@ -57,31 +57,43 @@ base_images = {}
 images = []
 
 
+# regex for repository
+RE_REPOSITORY = re.compile(
+r'''
+(?:(?P<host>[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*		# host name
+            (?:						# followed by ...
+               (?:\.[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*)+	# domain
+               (?::[0-9]+)?				# and optional port
+               |					# or ...
+               :[0-9]+)					# port
+)/)?							# finally a /
+
+(?P<repo>[a-z0-9]+(?:(?:\.|__?|-+)[a-z0-9]+)*		# repo component
+         (?:/[a-z0-9]+(?:(?:\.|__?|-+)[a-z0-9]+)*)*	# more components
+)
+(?::(?P<tag>[a-zA-Z0-9_][a-zA-Z0-9_.-]{,127}))?		# optional tag
+(?:@(?P<digest>[a-z0-9]+(?:[.+_-][a-z0-9]+)*		# optional digest
+               :[0-9a-f]{32,}))?
+''', re.VERBOSE)
+
 def parse_repository(repository):
     """ extract registry, user and tag from repository """
-    repo = repository.split("/")
-    # extract registry
-    if len(repo) >= 2 and ("." in repo[0] or ":" in repo[0]):
-        registry = repo.pop(0)
-    else:
-        registry = "docker.io"
-    # extract user
-    if len(repo) >= 2:
-        user = repo[0]
-    else:
+    # verify repository format and extract components
+    match = RE_REPOSITORY.fullmatch(repository)
+    if not match:
+        raise ValueError("invalid reference format")
+    registry = match.group('host') or "docker.io"
+    repo = match.group('repo')
+    tag = match.group('digest') or match.group('tag') or "latest"
+    # user is first component of repo
+    user, *rest = repo.split('/', 1)
+    if not rest:
         user = ""
     # special handling for docker.io
     if registry == "docker.io":
         registry = "registry-1.docker.io"
-    if registry.endswith(".docker.io") and len(repo) == 1:
-        repo.insert(0, "library")
-    # extract tag
-    repo[-1], *tag = repo[-1].rsplit(":", 1)
-    repo = "/".join(repo)
-    if tag and tag[0]:
-        tag = tag[0]
-    else:
-        tag = "latest"
+    if registry.endswith(".docker.io") and not user:
+        repo = "library/" + repo
     return registry, user, repo, tag
 
 
@@ -187,25 +199,25 @@ def get_time_layers(repository):
     https://docs.docker.com/registry/spec/api/
     """
 
-    registry, user, repo, tag = parse_repository(repository)
     try:
+        registry, user, repo, tag = parse_repository(repository)
         # get authentification token
         auth_header = get_auth_token(registry, user, repo)
         if auth_header is None:
-            return None
+            return (None, [])
 
         # get manifest
         data = get_manifest(registry, repo, tag, auth_header)
         if data is None:
-            return None
+            return (None, [])
         digest = data["config"]["digest"]
 
         # get repository information: GET /v2/{repo}/blobs/{digest}
         data = get_data("https://{registry}/v2/{repo}/blobs/{digest}"
                         .format(registry=registry, repo=repo, digest=digest),
                         auth_header)
-        return [dateutil.parser.parse(data["created"]).timestamp()] + \
-               data["rootfs"]["diff_ids"]
+        return (dateutil.parser.parse(data["created"]).timestamp(),
+                data["rootfs"]["diff_ids"])
     except json.JSONDecodeError:
         sys.exit("{}: {}".format(repository, "Invalid JSON"))
     except (requests.exceptions.RequestException, ValueError) as err:
@@ -310,10 +322,10 @@ def needs_rebuild(image):
     # update base_image layer, if empty
     base_img = base_images[image["base"]]
     if not base_img["layer"]:
-        itime_layers = get_time_layers(image["base"])
+        itime, layers = get_time_layers(image["base"])
         # store last layer
-        if itime_layers and len(itime_layers) > 1:
-            base_img["layer"] = itime_layers[-1]
+        if layers:
+            base_img["layer"] = layers[-1]
         else:
             sys.exit("Missing base image: {}".format(image["base"]))
 
@@ -321,9 +333,8 @@ def needs_rebuild(image):
     full_name = image["name"]
     if "/" not in full_name:
         full_name = docker_acct + full_name
-    itime_layers = get_time_layers(full_name)
-    if itime_layers:
-        itime, *layers = itime_layers
+    itime, layers = get_time_layers(full_name)
+    if itime and layers:
         if full_name in base_images:	# image is a base image
             base_images[full_name]["layer"] = layers[-1]
     else:
@@ -370,10 +381,10 @@ def build(image):
     print()
 
     if full_name in base_images:	# just modified a base image
-        itime_layers = get_time_layers(full_name)
+        _, layers = get_time_layers(full_name)
         # store last layer
-        if itime_layers and len(itime_layers) > 1:
-            base_images[full_name]["layer"] = itime_layers[-1]
+        if layers:
+            base_images[full_name]["layer"] = layers[-1]
         else:
             sys.exit("Can't get image layers of {}".format(image["name"]))
 
@@ -388,7 +399,10 @@ if not docker_acct:
 docker_passwd = os.environ.pop("DOCKER_PASSWORD", None)
 if not docker_acct.endswith("/"):
     docker_acct += "/"
-docker_registry, docker_user, *_ = parse_repository(docker_acct + "dummy")
+try:
+    docker_registry, docker_user, *_ = parse_repository(docker_acct + "dummy")
+except ValueError as err:
+    sys.exit("DOCKER_ACCOUNT={}: {}".format(docker_acct[:-1], err))
 
 api_sess = requests_session_retry(2)
 
