@@ -1,6 +1,6 @@
 # Name		Directory	[Base Image]	[Build Options]
 
---platform=linux/arm64,linux/amd64		# global options
+--platform=linux/amd64,linux/arm64		# global options
 
 # ipterm
 ipterm-base	ipterm/base
