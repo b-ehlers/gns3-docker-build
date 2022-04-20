@@ -100,25 +100,27 @@ def container_prune(containers, prune_age, dry_run=False):
                     dateutil.parser.parse(version['created_at']))
         tag_window = timedelta(minutes=15)
 
-        for version in versions:
+        del_cnt = 0
+        del_header = "Would delete" if dry_run else "Deleted"
+        for version in sorted(versions, key=lambda k: k["id"], reverse=True):
             # prune old untagged images if requested
             created = dateutil.parser.parse(version['created_at'])
             if created < del_before and \
-               len(version["metadata"]["container"]["tags"]) == 0:
+               not version["metadata"]["container"]["tags"]:
                 # don't prune untagged images nearby tagged ones
                 for tag_created in tagged_created:
                     if tag_created-tag_window < created <= tag_created:
                         break
                 else:
-                    if dry_run:
-                        print(f'Would delete {version["id"]}')
-                    else:
-                        # delete version
+                    if not dry_run:		# delete version
                         resp = sess.delete('https://api.github.com/user/packages/'
                                            f'container/{container}/'
                                            f'versions/{version["id"]}')
                         resp.raise_for_status()
-                        print(f'Deleted {version["id"]}')
+                    if not del_cnt:
+                        print(f'  {del_header}:')
+                    print(f'  {version["name"]}')
+                    del_cnt += 1
 
 
 if __name__ == "__main__":
