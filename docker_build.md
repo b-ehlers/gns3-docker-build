@@ -28,8 +28,10 @@ the directory containing the docker build context.
 When at least one of these conditions is met, the tool
 starts a rebuild of that image.
 
-Alternatively, `docker_build` can also be run with some
-image names as arguments. Then these images will be rebuilt.
+When `docker_build` is run with some image names as
+arguments, then these images are additionally built.
+When using a base image name as an argument, then all
+images with that base image are rebuilt.
 
 As a special case, if the first argument is `all`, then
 all images are rebuild, except those following `all`.

@@ -33,9 +33,9 @@ if the directory containing its Dockerfile has changed or
 its base image has been updated.
 
 In some special cases a docker image needs a forced rebuild.
-For that add the list of images, to be rebuild, to the arguments.
-If the first image is "all", all images will be forcely rebuild.
-Further images following "all" will be skipped.
+For that add the list of images or base images, to be rebuild,
+to the arguments. If the first image is "all", all images will
+be forcely rebuild, except those following "all".
 
 The environment variable DOCKER_ACCOUNT must be set to the
 registry/user of the Docker account to use.
@@ -411,21 +411,21 @@ api_sess = requests_session_retry(2)
 
 get_images()
 init_base_images()
-if args:				# image names from command line
-    if args[0] == "all":		# rebuild all, except following images
-        for img in images:
-            if img["name"] not in args[1:]:
-                build(img)
-    else:				# rebuild images from args
-        name2image = {}
-        for img in images:
-            name2image[img["name"]] = img
-        for iname in args:
-            if iname not in name2image:
-                sys.exit("Image {} not found in 'images' configuration file"
-                         .format(iname))
-            build(name2image[iname])
-else:					# build only changed images
-    for img in images:
-        if needs_rebuild(img):
-            build(img)
+
+# set rebuild_all flag, if first argument is "all"
+rebuild_all = bool(args and args[0] == "all")
+if rebuild_all:
+    args.pop(0)
+
+# check arguments
+all_inames = [img["name"] for img in images] + list(base_images.keys())
+for iname in args:
+    if iname not in all_inames:
+        sys.exit("Image {} not found in 'docker_images' configuration file"
+                 .format(iname))
+
+# rebuild images
+for img in images:
+    if (rebuild_all ^ bool(img["name"] in args or img["base"] in args)) or \
+       needs_rebuild(img):
+        build(img)
