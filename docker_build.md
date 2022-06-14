@@ -95,27 +95,6 @@ need to be done:
 Then `docker_build` can be executed,
 normally without any arguments.
 
-But what, when an image build needs to be forced?
-
-For that a tag needs to be created, that contains the list
-of images, joined by a `_` and beginning with a `_`.
-For example, if images abc and def should both be
-rebuild, create the tag `_abc_def`. The underscore at the
-beginning was choosen to allow the use of "normal" tags,
-that won't interfere with the build system.
-
-Furthermore a tag may not contain a `:`, but images can.
-Therefore a `;` was choosen to replace the `:` of an image.
-
-The following part of a shell script undoes this replacement.
-It generates a list of images out of a tag and stores them as
-positional parameters:
-
-```
-if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-	set -f
-	set -- $(echo "${GITHUB_REF_NAME#_}" | tr ';_' ': ')
-	set +f
-fi
-```
-
+But what, when an image build needs to be forced?  
+For that, run the action manually and enter the list
+of images, separated by spaces, into the input field.

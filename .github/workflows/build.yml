@@ -4,11 +4,15 @@ on:
     branches:
       - main
       - master
-    tags:
-      - '_**'
   schedule:
     - cron: '37 7 * * 3'
   workflow_dispatch:
+    inputs:
+      images:
+        description: 'List of images to be built'
+        required: false
+        type: string
+
 jobs:
   docker-images:
     runs-on: ubuntu-latest
@@ -45,12 +49,10 @@ jobs:
           # DockerHub:
           # DOCKER_ACCOUNT: ${{ secrets.DOCKERHUB_USERNAME }}
           # DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          #
+          IMAGES: ${{ inputs.images }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            set -f
-            set -- $(echo "${GITHUB_REF_NAME#_}" | tr ';_' ': ')
-            set +f
-          else
-            set --
-          fi
+          set -f
+          set -- $IMAGES
+          set +f
           python3 "$GITHUB_WORKSPACE/.github/bin/docker_build" "$@"
