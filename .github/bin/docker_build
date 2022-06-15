@@ -58,8 +58,7 @@ images = []
 
 
 # regex for repository
-RE_REPOSITORY = re.compile(
-r'''
+RE_REPOSITORY = re.compile(r'''
 (?:(?P<host>[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*		# host name
             (?:						# followed by ...
                (?:\.[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*)+	# domain
@@ -231,7 +230,7 @@ def get_time_layers(repository):
         sys.exit("{}: missing information from registry".format(repository))
 
 
-def dockerfile_base(directory, image_file, lineno):
+def dockerfile_base(directory):
     """ get base repository from Dockerfile """
     base = None
     re_from = re.compile(r'\s*FROM\s+(\S+)', re.IGNORECASE)
@@ -243,11 +242,9 @@ def dockerfile_base(directory, image_file, lineno):
                     base = match.group(1)
                     break
     except OSError as err:
-        sys.exit("{}: Dockerfile in line {}: {}"
-                 .format(image_file, lineno, err))
+        raise ValueError("Dockerfile: {}".format(err)) from err
     if not base:
-        sys.exit("{}: Dockerfile in line {}: {}"
-                 .format(image_file, lineno, "Missing FROM instruction"))
+        raise ValueError("Dockerfile: {}".format("Missing FROM instruction"))
     return base
 
 
@@ -282,23 +279,28 @@ def get_images():
                 lineno += 1
                 match = RE_CONF_LINE.fullmatch(line.strip())
                 if not match:
-                    sys.exit("{}: invalid number of fields in line {}"
+                    sys.exit("{} line {}: invalid number of fields"
                              .format(image_file, lineno))
                 if match.group('gbl_opt'):
                     gbl_options = shlex.split(match.group('gbl_opt'))
                 if match.group('name') and match.group('dir'):
                     name = match.group('name')
+                    try:
+                        parse_repository(name)
+                    except ValueError:
+                        sys.exit("{} line {}: invalid image name '{}'"
+                                 .format(image_file, lineno, name))
                     if name in name_list:
                         sys.exit("{}: multiple entries for {}"
                                  .format(image_file, name))
                     name_list[name] = True
                     directory = match.group('dir')
                     if not os.path.isdir(directory):
-                        sys.exit("{}: unknown directory '{}' in line {}"
-                                 .format(image_file, directory, lineno))
+                        sys.exit("{} line {}: unknown directory '{}'"
+                                 .format(image_file, lineno, directory))
                     base = match.group('base')
                     if not base:	# extract base repo from Dockerfile
-                        base = dockerfile_base(directory, image_file, lineno)
+                        base = dockerfile_base(directory)
                     options = gbl_options.copy()
                     if match.group('opt'):
                         options += shlex.split(match.group('opt'))
@@ -307,7 +309,7 @@ def get_images():
     except OSError as err:
         sys.exit("Can't read images file: {}".format(err))
     except ValueError as err:
-        sys.exit("{}: {} in line {}".format(image_file, err, lineno))
+        sys.exit("{} line {}: {}".format(image_file, lineno, err))
     if not images:
         sys.exit("Empty image configuration")
 
